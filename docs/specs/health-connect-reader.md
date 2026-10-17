@@ -112,9 +112,22 @@ Every line carries `recordType`, the times and zone offsets, and `metadata` (`id
 Units come from the androidx unit classes (`Mass.inKilograms`, `Pressure.inMillimetersOfMercury`,
 `BloodGlucose.inMillimolesPerLiter`, ...), never from a display string.
 
-Not read, because the server does not map them yet: `TotalCaloriesBurned`, `Hydration`,
-`Nutrition`, `Vo2Max`, `BasalMetabolicRate`, `ExerciseRoute`, `Power`, `Speed` and the other
-types. Adding one is a server change first (a mapper entry and its tests), then one line here.
+Pull request #148 (draft) teaches the server four more types. The reader reads them once it is
+merged, with their mapping tests against the same fixture:
+
+| Health Connect record | Line fields |
+|---|---|
+| `TotalCaloriesBurned` | `energyKilocalories` |
+| `BasalMetabolicRate` | `basalMetabolicRateKilocaloriesPerDay` |
+| `Nutrition` | `name`, `mealType`, `energyKilocalories`, `energyFromFatKilocalories`, every mass as `<field>Grams` (`Mass.inGrams`, the server converts each to its nutrient's unit) |
+| `Hydration` | `volumeLiters` |
+
+If #148 is not merged when the reader is, these four ship in a follow-up and nothing else
+changes.
+
+Not read, because the server does not map them yet: `Vo2Max`, `ExerciseRoute`, `Power`, `Speed`
+and the other types. Adding one is a server change first (a mapper entry and its tests), then
+one line here.
 
 ## Out of scope
 
