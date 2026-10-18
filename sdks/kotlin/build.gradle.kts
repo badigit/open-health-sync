@@ -71,7 +71,7 @@ publishing {
                 developers {
                     developer {
                         id.set("QuentinCar0n")
-                        name.set("Quentin Caron")
+                        name.set("QuentinCar0n")
                         url.set("https://github.com/QuentinCar0n")
                     }
                 }
