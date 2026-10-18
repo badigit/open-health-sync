@@ -686,3 +686,107 @@ func TestUnitsAreKnown(t *testing.T) {
 		assert.Empty(t, model.CanonicalizeUnits(&res), "%s %x", v.char, v.value)
 	}
 }
+
+// sampleFields is a line a client decoded itself (a vendor band's driver).
+func sampleFields(sample map[string]any) map[string]any {
+	m := fields("61080003-8d6d-82b8-614a-1c8cb0f8dcc6", nil)
+	delete(m, "value")
+	m["device"] = map[string]any{"name": "Band 1A2B", "firmware": "41.17"}
+	m["sample"] = sample
+	return m
+}
+
+func TestDecodedSamples(t *testing.T) {
+	mapFields := func(m map[string]any) (model.MapResult, error) {
+		return New().Map(connector.RawRecord{UserID: testUser, Provider: Slug, DataType: DataType, Fields: m})
+	}
+
+	t.Run("quantity in its storage unit", func(t *testing.T) {
+		res, err := mapFields(sampleFields(map[string]any{
+			"type": "skin_temperature", "value": 33.25, "unit": "celsius",
+			"start": "2026-10-16T03:00:00Z",
+		}))
+		require.NoError(t, err)
+		require.Len(t, res.QuantitySamples, 1)
+		s := res.QuantitySamples[0]
+		assert.Equal(t, "skin_temperature", s.QuantityType)
+		assert.InDelta(t, 33.25, s.Value, 1e-9)
+		assert.Equal(t, "celsius", s.Unit)
+		assert.Equal(t, time.Date(2026, 10, 16, 3, 0, 0, 0, time.UTC), s.StartDate)
+		assert.Equal(t, s.StartDate, s.EndDate)
+		assert.Equal(t, "client", s.Metadata["decoded_by"])
+		assert.Equal(t, "41.17", s.Metadata["firmware"])
+		assert.Len(t, s.ContentHash, 64)
+		assert.Empty(t, res.HeartbeatSamples)
+	})
+
+	t.Run("converted unit and a span", func(t *testing.T) {
+		res, err := mapFields(sampleFields(map[string]any{
+			"type": "skin_temperature", "value": 92.3, "unit": "degF",
+			"start": "2026-10-16T03:00:00Z", "end": "2026-10-16T03:01:00Z",
+		}))
+		require.NoError(t, err)
+		s := res.QuantitySamples[0]
+		assert.InDelta(t, 33.5, s.Value, 1e-6)
+		assert.Equal(t, "celsius", s.Unit)
+		assert.Equal(t, time.Minute, s.EndDate.Sub(s.StartDate))
+	})
+
+	t.Run("rr interval is a beat of the session", func(t *testing.T) {
+		res, err := mapFields(sampleFields(map[string]any{
+			"type": "rr_interval", "value": 812.5, "unit": "ms", "start": "2026-10-16T19:04:05.1Z",
+		}))
+		require.NoError(t, err)
+		require.Len(t, res.HeartbeatSamples, 1)
+		b := res.HeartbeatSamples[0]
+		assert.Equal(t, "9f2c4e1a7b3d5c60", b.SeriesID)
+		assert.InDelta(t, 812.5, b.RRMS, 1e-9)
+		assert.Empty(t, res.QuantitySamples)
+	})
+
+	t.Run("same reading re-sent hashes the same", func(t *testing.T) {
+		s := map[string]any{"type": "heart_rate", "value": 58.0, "unit": "bpm", "start": "2026-10-16T03:00:00Z"}
+		a, err := mapFields(sampleFields(s))
+		require.NoError(t, err)
+		later := sampleFields(s)
+		later["at"] = "2026-10-17T09:00:00+02:00"
+		b, err := mapFields(later)
+		require.NoError(t, err)
+		assert.Equal(t, a.QuantitySamples[0].ContentHash, b.QuantitySamples[0].ContentHash)
+	})
+
+	bad := map[string]map[string]any{
+		"undeclared type":      {"type": "mood", "value": 1.0, "unit": "count", "start": "2026-10-16T03:00:00Z"},
+		"unit not convertible": {"type": "heart_rate", "value": 60.0, "unit": "kg", "start": "2026-10-16T03:00:00Z"},
+		"no unit":              {"type": "heart_rate", "value": 60.0, "start": "2026-10-16T03:00:00Z"},
+		"no value":             {"type": "heart_rate", "unit": "bpm", "start": "2026-10-16T03:00:00Z"},
+		"rr not in ms":         {"type": "rr_interval", "value": 0.8, "unit": "s", "start": "2026-10-16T03:00:00Z"},
+		"rr out of range":      {"type": "rr_interval", "value": -3.0, "unit": "ms", "start": "2026-10-16T03:00:00Z"},
+		"start not a time":     {"type": "heart_rate", "value": 60.0, "unit": "bpm", "start": "yesterday"},
+		"start before 2000":    {"type": "heart_rate", "value": 60.0, "unit": "bpm", "start": "1999-12-31T23:00:00Z"},
+		"start in the future":  {"type": "heart_rate", "value": 60.0, "unit": "bpm", "start": "2026-10-16T20:00:00Z"},
+		"end before start": {"type": "step_count_intraday", "value": 12.0, "unit": "count",
+			"start": "2026-10-16T03:01:00Z", "end": "2026-10-16T03:00:00Z"},
+	}
+	for name, s := range bad {
+		t.Run(name, func(t *testing.T) {
+			_, err := mapFields(sampleFields(s))
+			assert.ErrorIs(t, err, ErrInvalidLine)
+		})
+	}
+
+	t.Run("value and sample together", func(t *testing.T) {
+		m := sampleFields(map[string]any{"type": "heart_rate", "value": 60.0, "unit": "bpm", "start": "2026-10-16T03:00:00Z"})
+		m["value"] = "0050"
+		_, err := mapFields(m)
+		assert.ErrorIs(t, err, ErrInvalidLine)
+	})
+
+	t.Run("upload accepts sample lines", func(t *testing.T) {
+		body := encodeLine(t, sampleFields(map[string]any{
+			"type": "hrv_rmssd", "value": 41.0, "unit": "ms", "start": "2026-10-16T03:00:00Z",
+		}))
+		err := New().ParseUpload(connector.UploadMeta{Type: DataType}, strings.NewReader(body), nil)
+		assert.NoError(t, err)
+	})
+}

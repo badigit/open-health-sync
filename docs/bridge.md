@@ -169,6 +169,24 @@ A phone app connected to the same strap (Polar Flow, Polar Beat) can keep the br
 finding it or from starting its streams: close that app, or switch the phone's Bluetooth off,
 while the bridge records.
 
+## More vendor drivers
+
+The bridge is also a Rust library. A driver for another vendor's protocol implements the
+`Protocol` and `Driver` traits of the `ohs-driver` crate (a state machine with no I/O: it says
+what to subscribe to, read and write, and is fed what the device answers), and a binary of its
+own runs the whole bridge with it:
+
+```rust
+fn main() -> std::process::ExitCode {
+    ohs_bridge::main_with("my-bridge", vec![Box::new(MyBand)])
+}
+```
+
+The binary has every command of `ohs-bridge`. `scan` names the protocol that recognizes a
+device, `run --any` connects to it, and its decoded values go up as `sample` lines
+([line format](connectors/bluetooth.md#6-upload-contract)). On `watch` a driver is told not to upload,
+and must not acknowledge or erase records the device stores.
+
 ## Activity files from a watch over USB
 
 Garmin and other watches that write FIT files sync without a phone when plugged in:

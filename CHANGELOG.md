@@ -103,6 +103,11 @@ release may change the API, the configuration or the database schema.
   valid beats only, and stores the other frames for a later decoder. Vendor drivers have no
   I/O, so the same code can later run in a phone app. See
   [docs/specs/vendor-bluetooth.md](docs/specs/vendor-bluetooth.md) for the other vendors.
+- Vendor driver plug-ins: the driver interface is its own crate, `ohs-driver`, and `ohs-bridge`
+  is also a library whose `main_with` takes more protocols, so another binary adds vendor
+  drivers without forking the bridge. Such a driver decodes on the client and sends a `sample`
+  line (a declared type, value, unit and time) that the server checks and stores as sent;
+  `watch` never lets a driver acknowledge or erase data on a device.
 - Swift and Kotlin SDKs: `BluetoothRecorder` builds the Bluetooth upload parts and
   `uploadBluetoothPart` sends them; the Swift package gets an `OpenHealthSyncBluetooth`
   product (CoreBluetooth) that does the scanning and subscriptions on iOS and macOS, and the

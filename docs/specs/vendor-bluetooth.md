@@ -102,6 +102,14 @@ and hands every value the driver owns back to it. Why:
 The transport picks a driver from the characteristics a device serves, after the standard
 profiles are set up. A device with no driver works as before.
 
+The driver interface is its own crate, `ohs-driver`, and `ohs-bridge` is also a library whose
+`main_with` takes more protocols. A driver kept outside this repository (WHOOP, open question 2)
+builds its own binary on the bridge without forking it. Such a driver decodes on the client:
+the server has no decoder for its bytes, so it sends `sample` lines (a declared type, value,
+unit and time) that the server checks and stores as sent. The trade is that a decoder fix there
+does not re-map old data. A driver is told whether the connection uploads (`run`) or only shows
+(`watch`), and on `watch` takes no step that loses data on the device.
+
 ## Upload contract
 
 Two changes to the line of [bluetooth-devices.md](bluetooth-devices.md#upload-contract):

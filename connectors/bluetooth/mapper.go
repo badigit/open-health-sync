@@ -95,6 +95,64 @@ func mapMeasurement(userID string, p parsed, m *measurement) model.MapResult {
 	return res
 }
 
+// mapSample turns a sample the client decoded into a canonical record, with
+// the provenance and the hash of a decoded measurement.
+func mapSample(userID string, p parsed) model.MapResult {
+	d := p.sample
+	if d.qt == rrInterval {
+		return model.MapResult{HeartbeatSamples: []model.HeartbeatSample{{
+			SeriesID:  p.Session,
+			UserID:    userID,
+			Timestamp: d.start.UTC(),
+			RRMS:      d.value,
+		}}}
+	}
+	var dev device
+	if p.Device != nil {
+		dev = *p.Device
+	}
+	src := sourceOf(dev)
+	_, offset := p.at.Zone()
+	minutes := offset / 60
+	md := map[string]any{
+		"gatt_characteristic": p.char,
+		"session":             p.Session,
+		"clock":               "device",
+		"decoded_by":          "client",
+		"utc_offset_minutes":  minutes,
+	}
+	if z := offsetZone(minutes); z != "" {
+		md["timezone"] = z
+	}
+	if dev.Firmware != "" {
+		md["firmware"] = dev.Firmware
+	}
+	measured := false
+	return model.MapResult{QuantitySamples: []model.QuantitySample{{
+		UserID:         userID,
+		Provider:       Slug,
+		SourceSlug:     src.slug,
+		SourceName:     src.name,
+		DeviceID:       src.deviceID,
+		DeviceModel:    src.deviceModel,
+		WasUserEntered: &measured,
+		QuantityType:   d.qt,
+		Value:          d.value,
+		Unit:           d.unit,
+		StartDate:      d.start.UTC(),
+		EndDate:        d.end.UTC(),
+		Metadata:       md,
+		ContentHash: model.ComputeContentHash(map[string]string{
+			"user_id":       userID,
+			"provider":      Slug,
+			"source_slug":   src.slug,
+			"quantity_type": d.qt,
+			"start_date":    d.start.UTC().Format(time.RFC3339Nano),
+			"value":         model.CanonicalFloat(d.value),
+		}),
+	}}}
+}
+
 // when is the time of a measurement and where it comes from: the device's
 // clock when the value carries a time stamp that can be a reading time
 // (a real date, not before 2000, not more than deviceAhead after the

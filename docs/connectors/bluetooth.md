@@ -94,7 +94,8 @@ with the `upload` scope, the headers `X-OHS-Type` (always `gatt`), `X-OHS-Day`, 
 |---|---|---|
 | `at` | yes | RFC 3339 time the value arrived, with the uploader's UTC offset |
 | `char` | yes | Characteristic UUID: 16-bit (`2a37`), the full Bluetooth base UUID form, or the full 128-bit UUID of a vendor characteristic (`fb005c82-02e7-f387-1cad-8acd2d8df0c8`), any case |
-| `value` | yes | The value's bytes in hex, 1 to 512 bytes |
+| `value` | yes, unless `sample` | The value's bytes in hex, 1 to 512 bytes |
+| `sample` | instead of `value` | A value the client decoded itself, for a vendor protocol this server does not decode: `type` (a declared quantity type, or `rr_interval`), `value` (a finite number), `unit` (the type's storage unit or one that converts to it; `ms` for `rr_interval`), `start` and optional `end` (RFC 3339, not before 2000, not more than ten minutes after `at`). See below |
 | `ctx` | no | Vendor values only: what the client sent to start the stream the value belongs to, in hex, at most 64 bytes, so each line decodes on its own. For Polar Measurement Data: the measurement type, then the settings of the start request and the factor the device answered, in the PMD settings encoding |
 | `session` | yes | 8 to 64 letters, digits, `_` or `-`, chosen per connection to one device. It names the RR series |
 | `device` | no | `name` (advertised name), `manufacturer`, `model`, `firmware` (Device Information service), at most 128 characters each |
@@ -113,6 +114,18 @@ format (a field missing, `at` without an offset, `value` or `ctx` not hex, `char
 16-bit nor a 128-bit UUID), `X-OHS-Type` is not `gatt`, or the part holds no line. A value that does not decode (shorter than its flags say) is a failed
 record of its own line, shown in sync health; the other lines are kept. A characteristic not in
 the mapping (battery level, a vendor service) is stored and not mapped.
+
+A client that speaks a vendor protocol the server does not decode (a driver built on
+`ohs-bridge`, see [bridge.md](../bridge.md)) sends what it decoded instead of the bytes:
+
+```json
+{"at":"2026-10-18T07:12:00+02:00","char":"61080003-8d6d-82b8-614a-1c8cb0f8dcc6","sample":{"type":"skin_temperature","value":33.25,"unit":"celsius","start":"2026-10-18T03:00:00.000Z"},"session":"9f2c4e1a7b3d5c60"}
+```
+
+A line carries `value` or `sample`, never both. The part is refused when a sample's type is not
+declared, its unit does not convert to the type's storage unit, its value is not finite, or its
+times are out of bounds. The server cannot re-decode such a line, so a client decoder fix does
+not re-map what was already sent.
 
 ## 7. Mapping
 
@@ -138,6 +151,7 @@ no sample).
 | PLX Continuous Measurement `2a5f` | SpO2PR-Normal | the same, at `at` |
 | Polar Measurement Data `fb005c82-...`, PP interval frames | heart rate | `heart_rate`, bpm, at `at`, metadata `polar_measurement` `pp_interval`. None off the skin |
 | | PP intervals (ms) | RR intervals in ms, series `session`. One flagged as not valid is left out, and still places the beats before it in time. None off the skin |
+| Any characteristic, a `sample` line | | A quantity of its `type` in its storage unit, from `start` to `end` (or `start`), metadata `decoded_by` `client` and `clock` `device`; an `rr_interval` is an RR interval of series `session` at `start`. Hashed on type, start and value, so a record the device sends again maps to the same row |
 | Polar Measurement Data, ECG, PPG and motion frames | | Stored, not mapped yet: a continuous waveform (130 ECG samples a second) needs its own storage decision. The raw store keeps every frame with its `ctx`, so a later decoder maps what was already sent |
 
 - Pulse oximeter status: data for demonstration or testing, measurement unavailable and invalid
