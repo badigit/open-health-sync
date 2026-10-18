@@ -155,6 +155,10 @@ pub struct Context {
     /// shows live values only and never takes a step that loses data on the
     /// device, such as acknowledging stored records.
     pub upload: bool,
+    /// The local offset from UTC, in seconds, for a device whose clock shows
+    /// wall time (a watch asking for the time). `None` when unknown: a driver
+    /// then leaves the device's clock alone rather than set it to UTC.
+    pub utc_offset: Option<i32>,
 }
 
 /// A family of devices that speak one protocol.

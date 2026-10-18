@@ -250,6 +250,7 @@ async fn session(
     };
     let ctx = Context {
         upload: opts.upload,
+        utc_offset: Some(Local::now().offset().local_minus_utc()),
     };
     let mut driver = vendor::detect(peer, &uuids, &opts.vendor, ctx);
     let find = |c: u16| chars.iter().find(|ch| short(&ch.uuid) == Some(c));

@@ -121,7 +121,10 @@ mod tests {
         };
         assert_eq!(recognized(band), vec!["band"]);
         assert!(recognized(other).is_empty());
-        let up = Context { upload: true };
+        let up = Context {
+            upload: true,
+            ..Default::default()
+        };
         let off = Config { polar: vec![] };
         assert!(detect(band, &[BAND], &off, up).is_some());
         assert!(detect(band, &[BAND], &off, Context::default()).is_none());
