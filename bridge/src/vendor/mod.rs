@@ -2,79 +2,24 @@
 
 //! Vendor protocols: devices that send their richest data on a service of
 //! their maker's rather than on a Bluetooth SIG profile (a Polar strap's raw
-//! ECG, for one). Each driver is a state machine without I/O: it says what to
-//! subscribe to, read and write, and is fed what the device answers. `ble`
-//! runs it over btleplug on a computer; a phone's Bluetooth stack can run the
-//! same driver, since nothing in it touches a radio, a clock or a file.
+//! ECG, for one). Each driver is a state machine without I/O, defined by the
+//! `ohs-driver` crate: it says what to subscribe to, read and write, and is
+//! fed what the device answers. `ble` runs it over btleplug.
 //!
-//! Values still go up as the bytes the device sent. A driver adds `ctx`, the
-//! bytes that tell the server how to read a value (for Polar, the settings a
-//! stream was started with), so the server decodes each line on its own.
+//! The bridge has one protocol of its own, Polar Measurement Data, whose
+//! values go up as the bytes the device sent with the context the server
+//! needs to decode them. A binary built on this crate adds more through
+//! `main_with`; theirs decode on the client and send canonical samples.
 
 pub mod polar;
 
+use std::sync::OnceLock;
+
 use uuid::Uuid;
 
-/// What a driver asks the radio to do, in order.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Action {
-    /// Turn on notifications or indications.
-    Subscribe(Uuid),
-    /// Read the value; it comes back through `Driver::input` with `read` set.
-    Read(Uuid),
-    /// Write the bytes, with response.
-    Write(Uuid, Vec<u8>),
-}
+pub use ohs_driver::{Action, Context, Driver, Live, Peer, Protocol, Step};
 
-/// What the live view shows for a value.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Live {
-    pub text: String,
-    /// A heart rate the value carries, for the status line.
-    pub heart_rate: Option<u16>,
-}
-
-/// What a driver answers to an input.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Step {
-    pub actions: Vec<Action>,
-    /// Upload the value, with these context bytes (empty for none).
-    pub upload: Option<Vec<u8>>,
-    pub live: Option<Live>,
-    /// Something the person should know: a stream the device refused, a
-    /// request it never answered. Never a health value.
-    pub note: Option<String>,
-}
-
-impl Step {
-    fn act(actions: Vec<Action>) -> Step {
-        Step {
-            actions,
-            ..Default::default()
-        }
-    }
-
-    fn note(mut self, text: impl Into<String>) -> Step {
-        self.note = Some(text.into());
-        self
-    }
-}
-
-/// A vendor protocol for one connection.
-pub trait Driver: Send {
-    /// The first actions, once the services are discovered.
-    fn start(&mut self) -> Vec<Action>;
-    /// Whether the values of this characteristic are the driver's.
-    fn owns(&self, char: &Uuid) -> bool;
-    /// A value of one of its characteristics: read (`read`), or notified.
-    fn input(&mut self, char: &Uuid, value: &[u8], read: bool) -> Step;
-    /// Whether an answer is awaited: the radio calls `timeout` when it does
-    /// not come.
-    fn waiting(&self) -> bool;
-    fn timeout(&mut self) -> Step;
-}
-
-/// Which vendor protocols to run, and what to ask of them.
+/// Which of the bridge's own protocols to run, and what to ask of them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Polar measurement types to stream; empty turns the Polar driver off.
@@ -89,10 +34,105 @@ impl Default for Config {
     }
 }
 
-/// The driver for a device with these characteristics, if one applies.
-pub fn detect(chars: &[Uuid], cfg: &Config) -> Option<Box<dyn Driver>> {
+static REGISTERED: OnceLock<Vec<Box<dyn Protocol>>> = OnceLock::new();
+
+/// Adds protocols for the life of the process. The first call wins.
+pub fn register(protocols: Vec<Box<dyn Protocol>>) {
+    let _ = REGISTERED.set(protocols);
+}
+
+fn registered() -> &'static [Box<dyn Protocol>] {
+    REGISTERED.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// The protocols that recognize an advertising device, by name.
+pub fn recognized(peer: Peer) -> Vec<&'static str> {
+    registered()
+        .iter()
+        .filter(|p| p.recognizes(peer))
+        .map(|p| p.name())
+        .collect()
+}
+
+/// The driver for a connected device, if a protocol applies: Polar first,
+/// then the registered ones in their order.
+pub fn detect(peer: Peer, chars: &[Uuid], cfg: &Config, ctx: Context) -> Option<Box<dyn Driver>> {
     if !cfg.polar.is_empty() && polar::present(chars) {
         return Some(Box::new(polar::Polar::new(&cfg.polar)));
     }
-    None
+    registered().iter().find_map(|p| p.driver(peer, chars, ctx))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use super::*;
+    use crate::ble::Target;
+
+    struct Band;
+
+    struct BandDriver;
+
+    const BAND: Uuid = ohs_driver::uuid(0x0000_aaaa_0000_1000_8000_0080_5f9b_34fb);
+
+    impl Driver for BandDriver {
+        fn start(&mut self, _now: SystemTime) -> Vec<Action> {
+            vec![Action::Subscribe(BAND)]
+        }
+        fn owns(&self, char: &Uuid) -> bool {
+            *char == BAND
+        }
+        fn input(&mut self, _: &Uuid, _: &[u8], _: bool, _: SystemTime) -> Step {
+            Step::default()
+        }
+        fn waiting(&self) -> bool {
+            false
+        }
+        fn timeout(&mut self, _: SystemTime) -> Step {
+            Step::default()
+        }
+    }
+
+    impl Protocol for Band {
+        fn name(&self) -> &'static str {
+            "band"
+        }
+        fn recognizes(&self, peer: Peer) -> bool {
+            peer.name.is_some_and(|n| n.starts_with("Band "))
+        }
+        fn driver(&self, peer: Peer, chars: &[Uuid], ctx: Context) -> Option<Box<dyn Driver>> {
+            (self.recognizes(peer) && chars.contains(&BAND) && ctx.upload)
+                .then(|| Box::new(BandDriver) as Box<dyn Driver>)
+        }
+    }
+
+    // The only test that registers: the registry lives as long as the process.
+    #[test]
+    fn registered_protocols() {
+        register(vec![Box::new(Band)]);
+        let band = Peer {
+            name: Some("Band 1A2B"),
+            services: &[],
+        };
+        let other = Peer {
+            name: Some("Speaker"),
+            services: &[],
+        };
+        assert_eq!(recognized(band), vec!["band"]);
+        assert!(recognized(other).is_empty());
+        let up = Context { upload: true };
+        let off = Config { polar: vec![] };
+        assert!(detect(band, &[BAND], &off, up).is_some());
+        assert!(detect(band, &[BAND], &off, Context::default()).is_none());
+        assert!(detect(other, &[BAND], &off, up).is_none());
+        // Polar comes first when a device serves both.
+        let both = [polar::CONTROL, polar::DATA, BAND];
+        let d = detect(band, &both, &Config::default(), up).unwrap();
+        assert!(d.owns(&polar::CONTROL));
+        // `--any` connects to a device a protocol recognizes.
+        let any = Target::new(&[], true);
+        assert!(any.matches(Some("Band 1A2B"), &[]));
+        assert!(!any.matches(Some("Speaker"), &[]));
+    }
 }

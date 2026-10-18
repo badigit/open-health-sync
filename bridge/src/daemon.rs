@@ -98,6 +98,7 @@ pub fn watch(devices: Vec<String>, vendor: vendor::Config) -> Result<(), String>
             device_user: None,
             glucose: Arc::default(),
             vendor,
+            upload: false,
         });
         let (tx, mut rx) = mpsc::channel(256);
         tokio::spawn(ble::connect_loop(adapter, target, opts, tx));
@@ -196,6 +197,7 @@ pub fn run(opts: cli::Run) -> Result<(), String> {
                 device_user: opts.device_user,
                 glucose: glucose.clone(),
                 vendor: opts.vendor.clone(),
+                upload: true,
             });
             tokio::spawn(ble::connect_loop(adapter, target, o, tx.clone()));
             log("looking for devices");
@@ -268,10 +270,10 @@ pub fn run(opts: cli::Run) -> Result<(), String> {
                             _ => {}
                         }
                     }
-                    Some(Event::Vendor { key, line, live }) => {
+                    Some(Event::Vendor { key, lines, live }) => {
                         let d = devices.entry(key).or_default();
-                        if let Some(l) = line {
-                            spool.append(&l, &mut locked(&queue)).map_err(io_err("cannot write the spool"))?;
+                        for l in &lines {
+                            spool.append(l, &mut locked(&queue)).map_err(io_err("cannot write the spool"))?;
                             d.values += 1;
                             d.last_value = Some(Utc::now());
                         }

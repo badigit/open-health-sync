@@ -17,6 +17,7 @@
 //! refuses is skipped, with its reason.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::time::SystemTime;
 
 use uuid::Uuid;
 
@@ -356,7 +357,7 @@ impl Polar {
 }
 
 impl Driver for Polar {
-    fn start(&mut self) -> Vec<Action> {
+    fn start(&mut self, _now: SystemTime) -> Vec<Action> {
         self.state = State::Features;
         vec![
             Action::Subscribe(CONTROL),
@@ -369,7 +370,7 @@ impl Driver for Polar {
         *char == CONTROL || *char == DATA
     }
 
-    fn input(&mut self, char: &Uuid, value: &[u8], _read: bool) -> Step {
+    fn input(&mut self, char: &Uuid, value: &[u8], _read: bool, _now: SystemTime) -> Step {
         if *char == DATA {
             let Some(code) = value.first().map(|b| b & 0x3f) else {
                 return Step::default();
@@ -396,7 +397,7 @@ impl Driver for Polar {
         self.state != State::Idle
     }
 
-    fn timeout(&mut self) -> Step {
+    fn timeout(&mut self, _now: SystemTime) -> Step {
         let what = match &self.state {
             State::Features => {
                 self.state = State::Idle;
@@ -461,6 +462,8 @@ pub fn describe(frame: &[u8]) -> Option<Live> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOW: SystemTime = SystemTime::UNIX_EPOCH;
 
     fn writes(step: &Step) -> Vec<Vec<u8>> {
         step.actions
@@ -531,7 +534,7 @@ mod tests {
     fn h10_starts_ecg_then_accelerometer() {
         let mut p = Polar::new(&[Kind::Ecg, Kind::Acc, Kind::Ppg]);
         assert_eq!(
-            p.start(),
+            p.start(NOW),
             vec![
                 Action::Subscribe(CONTROL),
                 Action::Subscribe(DATA),
@@ -540,9 +543,9 @@ mod tests {
         );
         assert!(p.waiting());
         // PPG is not offered: it is never asked for.
-        let s = p.input(&CONTROL, &H10_FEATURES, true);
+        let s = p.input(&CONTROL, &H10_FEATURES, true, NOW);
         assert_eq!(writes(&s), vec![vec![0x01, 0x00]]);
-        let s = p.input(&CONTROL, &H10_ECG_SETTINGS, false);
+        let s = p.input(&CONTROL, &H10_ECG_SETTINGS, false, NOW);
         // Byte for byte the start request of Polar's H10 diagram.
         assert_eq!(
             writes(&s),
@@ -550,10 +553,10 @@ mod tests {
                 0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0e, 0x00
             ]]
         );
-        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x00, 0x00, 0x00], false);
+        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x00, 0x00, 0x00], false, NOW);
         assert_eq!(s.note.as_deref(), Some("streaming ECG at 130 Hz"));
         assert_eq!(writes(&s), vec![vec![0x01, 0x02]]);
-        let s = p.input(&CONTROL, &H10_ACC_SETTINGS, false);
+        let s = p.input(&CONTROL, &H10_ACC_SETTINGS, false, NOW);
         assert_eq!(
             writes(&s),
             vec![vec![
@@ -561,7 +564,7 @@ mod tests {
             ]]
         );
         // Already streaming from an earlier connection counts as started.
-        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x02, 0x06], false);
+        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x02, 0x06], false, NOW);
         assert_eq!(s.note.as_deref(), Some("streaming accelerometer at 200 Hz"));
         assert!(s.actions.is_empty());
         assert!(!p.waiting());
@@ -569,7 +572,7 @@ mod tests {
         // Frames go up with the settings their stream was started with.
         let mut ecg = vec![0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0x00];
         ecg.extend([0xe8, 0x03, 0x00, 0x18, 0xfc, 0xff]); // 1000 µV, -1000 µV
-        let s = p.input(&DATA, &ecg, false);
+        let s = p.input(&DATA, &ecg, false, NOW);
         assert_eq!(
             s.upload,
             Some(vec![0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0e, 0x00])
@@ -579,23 +582,24 @@ mod tests {
             &DATA,
             &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 1, 0, 2, 0, 3, 0],
             false,
+            NOW,
         );
         assert_eq!(s.upload.unwrap()[0], 0x02);
         // A frame of a type never started still goes up, without context.
-        let s = p.input(&DATA, &[0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0x00], false);
+        let s = p.input(&DATA, &[0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0x00], false, NOW);
         assert_eq!(s.upload, Some(vec![]));
     }
 
     #[test]
     fn settings_over_several_packets() {
         let mut p = Polar::new(&[Kind::Acc]);
-        p.start();
-        p.input(&CONTROL, &H10_FEATURES, true);
+        p.start(NOW);
+        p.input(&CONTROL, &H10_FEATURES, true, NOW);
         let first = [0xf0, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xc8, 0x00];
-        assert!(p.input(&CONTROL, &first, false).actions.is_empty());
+        assert!(p.input(&CONTROL, &first, false, NOW).actions.is_empty());
         let last = [0xf0, 0x01, 0x02, 0x00, 0x00, 0x02, 0x01, 0x08, 0x00];
         assert_eq!(
-            writes(&p.input(&CONTROL, &last, false)),
+            writes(&p.input(&CONTROL, &last, false, NOW)),
             vec![vec![
                 0x02, 0x02, 0x00, 0x01, 0xc8, 0x00, 0x02, 0x01, 0x08, 0x00
             ]]
@@ -608,16 +612,16 @@ mod tests {
         // features, accelerometer settings, start, and the answer that
         // carries the factor 0x397FDA40.
         let mut p = Polar::new(&[Kind::Acc]);
-        p.start();
+        p.start(NOW);
         let mut features = vec![0x0f, 0x6e];
         features.extend([0; 15]);
-        let s = p.input(&CONTROL, &features, true);
+        let s = p.input(&CONTROL, &features, true, NOW);
         assert_eq!(writes(&s), vec![vec![0x01, 0x02]]);
         let settings = [
             0xf0, 0x01, 0x02, 0x00, 0x00, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02,
             0x01, 0x08, 0x00, 0x04, 0x01, 0x03,
         ];
-        let s = p.input(&CONTROL, &settings, false);
+        let s = p.input(&CONTROL, &settings, false, NOW);
         assert_eq!(
             writes(&s),
             vec![vec![
@@ -628,19 +632,19 @@ mod tests {
         let answer = [
             0xf0, 0x02, 0x02, 0x00, 0x00, 0x05, 0x01, 0x40, 0xda, 0x7f, 0x39,
         ];
-        let s = p.input(&CONTROL, &answer, false);
+        let s = p.input(&CONTROL, &answer, false, NOW);
         assert_eq!(s.note.as_deref(), Some("streaming accelerometer at 52 Hz"));
         let frame = [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x81];
-        let ctx = p.input(&DATA, &frame, false).upload.unwrap();
+        let ctx = p.input(&DATA, &frame, false, NOW).upload.unwrap();
         assert_eq!(&ctx[ctx.len() - 6..], &[0x05, 0x01, 0x40, 0xda, 0x7f, 0x39]);
 
         // The H10 answers a start with one reserved byte, not a factor.
         let mut p = Polar::new(&[Kind::Acc]);
-        p.start();
-        p.input(&CONTROL, &H10_FEATURES, true);
-        p.input(&CONTROL, &H10_ACC_SETTINGS, false);
-        p.input(&CONTROL, &[0xf0, 0x02, 0x02, 0x00, 0x00, 0x01], false);
-        let ctx = p.input(&DATA, &frame, false).upload.unwrap();
+        p.start(NOW);
+        p.input(&CONTROL, &H10_FEATURES, true, NOW);
+        p.input(&CONTROL, &H10_ACC_SETTINGS, false, NOW);
+        p.input(&CONTROL, &[0xf0, 0x02, 0x02, 0x00, 0x00, 0x01], false, NOW);
+        let ctx = p.input(&DATA, &frame, false, NOW).upload.unwrap();
         assert_eq!(
             ctx,
             vec![0x02, 0x00, 0x01, 0xc8, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00]
@@ -652,18 +656,18 @@ mod tests {
         // An optical sensor offering PPG, accelerometer, PPI, gyroscope and
         // magnetometer.
         let mut p = Polar::new(&[Kind::Ppi, Kind::Ppg]);
-        p.start();
-        let s = p.input(&CONTROL, &[0x0f, 0x6e, 0x00], true);
+        p.start(NOW);
+        let s = p.input(&CONTROL, &[0x0f, 0x6e, 0x00], true, NOW);
         // PP intervals have no settings: started at once.
         assert_eq!(writes(&s), vec![vec![0x02, 0x03]]);
-        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x03, 0x00, 0x00], false);
+        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x03, 0x00, 0x00], false, NOW);
         assert_eq!(s.note.as_deref(), Some("streaming PP intervals"));
         assert_eq!(writes(&s), vec![vec![0x01, 0x01]]);
         let ppg = [
             0xf0, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x37, 0x00, 0x01, 0x01, 0x16, 0x00, 0x04,
             0x01, 0x04,
         ];
-        let s = p.input(&CONTROL, &ppg, false);
+        let s = p.input(&CONTROL, &ppg, false, NOW);
         assert_eq!(
             writes(&s),
             vec![vec![
@@ -677,9 +681,10 @@ mod tests {
                 0xf0, 0x02, 0x01, 0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x80, 0x3f,
             ],
             false,
+            NOW,
         );
         assert_eq!(s.note.as_deref(), Some("streaming PPG at 55 Hz"));
-        let s = p.input(&DATA, &[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 9], false);
+        let s = p.input(&DATA, &[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 9], false, NOW);
         assert_eq!(
             s.upload,
             Some(vec![
@@ -691,7 +696,7 @@ mod tests {
         let mut ppi = vec![0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0x00];
         ppi.extend([72, 0x2c, 0x03, 0x0a, 0x00, 0x06]); // 812 ms
         ppi.extend([74, 0x25, 0x03, 0x0a, 0x00, 0x07]); // 805 ms, not valid
-        let s = p.input(&DATA, &ppi, false);
+        let s = p.input(&DATA, &ppi, false, NOW);
         assert_eq!(s.upload, Some(vec![0x03]));
         assert_eq!(
             s.live,
@@ -705,43 +710,43 @@ mod tests {
     #[test]
     fn refusals_and_silence_skip_a_stream() {
         let mut p = Polar::new(&[Kind::Ecg, Kind::Acc]);
-        p.start();
-        p.input(&CONTROL, &H10_FEATURES, true);
+        p.start(NOW);
+        p.input(&CONTROL, &H10_FEATURES, true, NOW);
         // The ECG settings refused: on to the accelerometer.
-        let s = p.input(&CONTROL, &[0xf0, 0x01, 0x00, 0x0d], false);
+        let s = p.input(&CONTROL, &[0xf0, 0x01, 0x00, 0x0d], false, NOW);
         assert_eq!(
             s.note.as_deref(),
             Some("ECG: settings refused (the device is on its charger)")
         );
         assert_eq!(writes(&s), vec![vec![0x01, 0x02]]);
-        let s = p.timeout();
+        let s = p.timeout(NOW);
         assert_eq!(s.note.as_deref(), Some("accelerometer: no answer, skipped"));
         assert!(!p.waiting());
         // An answer to something else is ignored.
         assert_eq!(
-            p.input(&CONTROL, &[0xf0, 0x02, 0x00, 0x00], false),
+            p.input(&CONTROL, &[0xf0, 0x02, 0x00, 0x00], false, NOW),
             Step::default()
         );
 
         let mut p = Polar::new(&[Kind::Ecg]);
-        p.start();
-        p.input(&CONTROL, &H10_FEATURES, true);
-        p.input(&CONTROL, &H10_ECG_SETTINGS, false);
-        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x00, 0x0a], false);
+        p.start(NOW);
+        p.input(&CONTROL, &H10_FEATURES, true, NOW);
+        p.input(&CONTROL, &H10_ECG_SETTINGS, false, NOW);
+        let s = p.input(&CONTROL, &[0xf0, 0x02, 0x00, 0x0a], false, NOW);
         assert_eq!(s.note.as_deref(), Some("ECG not started (MTU too small)"));
         assert!(!p.waiting());
 
         let mut p = Polar::new(&[Kind::Gyro]);
-        p.start();
-        let s = p.input(&CONTROL, &H10_FEATURES, true);
+        p.start(NOW);
+        let s = p.input(&CONTROL, &H10_FEATURES, true, NOW);
         assert_eq!(
             s.note.as_deref(),
             Some("offers none of the Polar streams asked for")
         );
         let mut p = Polar::new(&[Kind::Ecg]);
-        p.start();
+        p.start(NOW);
         assert_eq!(
-            p.timeout().note.as_deref(),
+            p.timeout(NOW).note.as_deref(),
             Some("no answer from the Polar measurement service")
         );
     }
@@ -772,9 +777,14 @@ mod tests {
     fn detection() {
         assert!(present(&[CONTROL, DATA]));
         assert!(!present(&[CONTROL]));
+        let peer = super::super::Peer {
+            name: Some("Polar H10 0A1B2C3D"),
+            services: &[],
+        };
+        let ctx = super::super::Context::default();
         let cfg = super::super::Config::default();
-        assert!(super::super::detect(&[CONTROL, DATA], &cfg).is_some());
+        assert!(super::super::detect(peer, &[CONTROL, DATA], &cfg, ctx).is_some());
         let off = super::super::Config { polar: vec![] };
-        assert!(super::super::detect(&[CONTROL, DATA], &off).is_none());
+        assert!(super::super::detect(peer, &[CONTROL, DATA], &off, ctx).is_none());
     }
 }
