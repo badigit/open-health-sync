@@ -6,11 +6,16 @@
 
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::codec;
 
 /// The longest value a line may carry, the ATT maximum attribute length.
 pub const MAX_VALUE_BYTES: usize = 512;
+
+/// The longest context a line may carry: the bytes a vendor protocol adds so
+/// the server can read a value on its own (a Polar stream's settings).
+pub const MAX_CTX_BYTES: usize = 64;
 
 /// The longest device string, in characters.
 const MAX_TEXT: usize = 128;
@@ -55,6 +60,8 @@ struct Line<'a> {
     at: String,
     char: String,
     value: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    ctx: String,
     session: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     device: Option<&'a Device>,
@@ -72,13 +79,51 @@ pub fn encode(
     device: &Device,
     device_user: Option<u8>,
 ) -> Option<String> {
+    encode_line(
+        at,
+        format!("{char:04x}"),
+        value,
+        &[],
+        session,
+        device,
+        device_user,
+    )
+}
+
+/// The line of a value on a vendor characteristic: its full UUID, and the
+/// context bytes its driver gave. None when the value or the context is
+/// longer than the server takes.
+pub fn encode_vendor(
+    at: &DateTime<FixedOffset>,
+    char: &Uuid,
+    value: &[u8],
+    ctx: &[u8],
+    session: &str,
+    device: &Device,
+) -> Option<String> {
+    if ctx.len() > MAX_CTX_BYTES {
+        return None;
+    }
+    encode_line(at, char.to_string(), value, ctx, session, device, None)
+}
+
+fn encode_line(
+    at: &DateTime<FixedOffset>,
+    char: String,
+    value: &[u8],
+    ctx: &[u8],
+    session: &str,
+    device: &Device,
+    device_user: Option<u8>,
+) -> Option<String> {
     if value.is_empty() || value.len() > MAX_VALUE_BYTES {
         return None;
     }
     let l = Line {
         at: at.to_rfc3339_opts(SecondsFormat::Millis, false),
-        char: format!("{char:04x}"),
+        char,
         value: codec::hex(value),
+        ctx: codec::hex(ctx),
         session,
         device: (!device.is_empty()).then_some(device),
         device_user,
@@ -209,6 +254,30 @@ mod tests {
             None
         )
         .is_some());
+    }
+
+    #[test]
+    fn vendor_values_carry_their_uuid_and_context() {
+        let pmd: Uuid = "fb005c82-02e7-f387-1cad-8acd2d8df0c8".parse().unwrap();
+        let l = encode_vendor(
+            &at(),
+            &pmd,
+            &[0x00, 0x01],
+            &[0x00, 0x00, 0x01, 0x82, 0x00],
+            "abcdefgh",
+            &Device::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            l,
+            "{\"at\":\"2026-10-16T21:04:05.120+02:00\",\"char\":\"fb005c82-02e7-f387-1cad-8acd2d8df0c8\",\"value\":\"0001\",\"ctx\":\"0000018200\",\"session\":\"abcdefgh\"}\n"
+        );
+        let plain = encode_vendor(&at(), &pmd, &[0x01], &[], "abcdefgh", &Device::default());
+        assert!(!plain.unwrap().contains("ctx"));
+        assert!(
+            encode_vendor(&at(), &pmd, &[1], &[0; 65], "abcdefgh", &Device::default()).is_none()
+        );
+        assert!(encode_vendor(&at(), &pmd, &[], &[], "abcdefgh", &Device::default()).is_none());
     }
 
     #[test]

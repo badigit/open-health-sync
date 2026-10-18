@@ -9,6 +9,8 @@ vendor account, no vendor app, no phone.
 It is one native binary (about 3 MB), written in Rust, in [`bridge/`](../bridge). It does not
 decode anything: each value goes up as the bytes the device sent, and the server decodes it
 ([Bluetooth connector](connectors/bluetooth.md)). The supported devices are listed there.
+Polar straps and optical sensors also stream raw ECG, PP intervals and motion through Polar's
+own measurement service ([Polar streams](#polar-streams)).
 
 | Platform | Bluetooth stack | Notes |
 |---|---|---|
@@ -134,6 +136,38 @@ Pass yours with `--device-user N` (0 to 254): the server then stores only your r
 
 Stop it with Ctrl-C, or SIGTERM from a service manager: it seals what it received before exiting,
 and the next start (or `ohs-bridge flush`) sends it.
+
+## Polar streams
+
+Polar straps (H10, H9) and optical sensors (Verity Sense, OH1, 360) send more than heart rate
+over their own measurement service: the H10 its raw single-lead ECG at 130 Hz, the optical
+sensors their beat-to-beat PP intervals, and both their accelerometer. When a connected device
+has that service, the bridge reads which streams it offers, asks each one for its settings,
+starts it with the highest sample rate, resolution and range it offers, and queues its frames
+like any other value.
+
+```console
+$ ohs-bridge watch --device "Polar H10" --polar ecg,acc
+07:42:10 Polar H10 connected
+07:42:11 Polar H10: streaming ECG at 130 Hz
+07:42:11 Polar H10: streaming accelerometer at 200 Hz
+07:42:11 Polar H10  64 bpm  RR 938 941 ms
+07:42:11 Polar H10  ECG 73 samples
+```
+
+`--polar` names the streams, on `watch` and `run`: `ecg`, `ppg`, `acc`, `ppi`, `gyro`, `mag`,
+separated by commas, or `all`, or `off` to keep to heart rate. The default is `ecg,ppi`. A
+device starts only the streams it offers; one it refuses (on its charger, a link too small for
+its frames) is skipped, and the log says why.
+
+Raw streams are heavier than heart rate: an H10's ECG is close to two values a second, about
+4.5 MB an hour before compression. The server keeps every frame; it maps PP intervals to heart
+rate and RR intervals today, and stores ECG and motion frames for a later decoder
+([mapping](connectors/bluetooth.md#7-mapping)).
+
+A phone app connected to the same strap (Polar Flow, Polar Beat) can keep the bridge from
+finding it or from starting its streams: close that app, or switch the phone's Bluetooth off,
+while the bridge records.
 
 ## Activity files from a watch over USB
 

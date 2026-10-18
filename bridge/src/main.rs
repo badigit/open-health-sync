@@ -19,6 +19,7 @@ mod queue;
 mod spool;
 mod status;
 mod upload;
+mod vendor;
 
 use std::process::ExitCode;
 
@@ -46,7 +47,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Scan { seconds, all } => daemon::scan(seconds, all),
-        Command::Watch { devices } => daemon::watch(devices),
+        Command::Watch { devices, vendor } => daemon::watch(devices, vendor),
         Command::Run(r) => daemon::run(r),
         Command::Files {
             dirs,

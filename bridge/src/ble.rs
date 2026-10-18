@@ -4,7 +4,7 @@
 //! send as events. It needs a radio, so only device matching is unit tested;
 //! the rest stays thin over the pure modules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,10 +22,13 @@ use uuid::Uuid;
 use crate::codec;
 use crate::gatt::{self, short};
 use crate::line::{self, Device};
+use crate::vendor::{self, Action, Driver, Live};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RETRY_FIRST: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(60);
+/// How long a vendor driver waits for an answer before it moves on.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What a connection reports.
 #[derive(Debug)]
@@ -42,6 +45,13 @@ pub enum Event {
         value: Vec<u8>,
         line: Option<String>,
     },
+    /// A value on a vendor characteristic: its upload line, and what the
+    /// live view shows of it.
+    Vendor {
+        key: String,
+        line: Option<String>,
+        live: Option<Live>,
+    },
     /// Something the user may need to act on (pairing, mostly).
     Note {
         key: String,
@@ -57,6 +67,8 @@ pub struct Options {
     pub device_user: Option<u8>,
     /// The last glucose sequence number stored, per device key.
     pub glucose: Arc<Mutex<HashMap<String, u16>>>,
+    /// The vendor protocols to run, and what to ask of them.
+    pub vendor: vendor::Config,
 }
 
 /// The first Bluetooth adapter.
@@ -224,6 +236,8 @@ async fn session(
 ) -> Result<(), btleplug::Error> {
     p.discover_services().await?;
     let chars = p.characteristics();
+    let uuids: Vec<Uuid> = chars.iter().map(|c| c.uuid).collect();
+    let mut driver = vendor::detect(&uuids, &opts.vendor);
     let find = |c: u16| chars.iter().find(|ch| short(&ch.uuid) == Some(c));
     let can = |ch: &&Characteristic, flags: CharPropFlags| ch.properties.intersects(flags);
 
@@ -318,29 +332,125 @@ async fn session(
         }
     }
 
+    // A vendor protocol: its requests now, its answers in the loop below.
+    let mut waiting_since = Instant::now();
+    if let Some(d) = driver.as_deref_mut() {
+        let actions = d.start();
+        for text in act(p, &chars, d, actions).await {
+            let _ = tx
+                .send(Event::Note {
+                    key: key.into(),
+                    text,
+                })
+                .await;
+        }
+    }
+
     let session = line::new_session();
-    let mut check = tokio::time::interval(Duration::from_secs(5));
+    let mut check = tokio::time::interval(Duration::from_secs(1));
+    let mut ticks = 0u32;
     loop {
         tokio::select! {
             n = stream.next() => {
                 let Some(n) = n else { break };
+                let at = Local::now().fixed_offset();
+                if let Some(d) = driver.as_deref_mut().filter(|d| d.owns(&n.uuid)) {
+                    let step = d.input(&n.uuid, &n.value, false);
+                    // A new request: its answer gets the full wait.
+                    if !step.actions.is_empty() {
+                        waiting_since = Instant::now();
+                    }
+                    let mut notes: Vec<String> = step.note.into_iter().collect();
+                    notes.extend(act(p, &chars, d, step.actions).await);
+                    for text in notes {
+                        let _ = tx.send(Event::Note { key: key.into(), text }).await;
+                    }
+                    if step.upload.is_none() && step.live.is_none() {
+                        continue;
+                    }
+                    let line = step.upload.and_then(|ctx| {
+                        line::encode_vendor(&at, &n.uuid, &n.value, &ctx, &session, &dev)
+                    });
+                    if tx.send(Event::Vendor { key: key.into(), line, live: step.live }).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 let Some(char) = short(&n.uuid) else { continue };
                 let line = gatt::MEASUREMENTS
                     .contains(&char)
-                    .then(|| line::encode(&Local::now().fixed_offset(), char, &n.value, &session, &dev, opts.device_user))
+                    .then(|| line::encode(&at, char, &n.value, &session, &dev, opts.device_user))
                     .flatten();
                 if tx.send(Event::Value { key: key.into(), char, value: n.value, line }).await.is_err() {
                     break;
                 }
             }
             _ = check.tick() => {
-                if !p.is_connected().await.unwrap_or(false) {
+                if let Some(d) = driver.as_deref_mut().filter(|d| d.waiting()) {
+                    if waiting_since.elapsed() >= ANSWER_TIMEOUT {
+                        let step = d.timeout();
+                        waiting_since = Instant::now();
+                        let mut notes: Vec<String> = step.note.into_iter().collect();
+                        notes.extend(act(p, &chars, d, step.actions).await);
+                        for text in notes {
+                            let _ = tx.send(Event::Note { key: key.into(), text }).await;
+                        }
+                    }
+                }
+                ticks += 1;
+                if ticks.is_multiple_of(5) && !p.is_connected().await.unwrap_or(false) {
                     break;
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Runs a driver's actions in order. A read's value goes back to the driver,
+/// whose own actions follow. Returns what to tell the person.
+async fn act(
+    p: &Peripheral,
+    chars: &BTreeSet<Characteristic>,
+    driver: &mut dyn Driver,
+    actions: Vec<Action>,
+) -> Vec<String> {
+    let mut queue: VecDeque<Action> = actions.into();
+    let mut notes = Vec::new();
+    while let Some(a) = queue.pop_front() {
+        let uuid = match &a {
+            Action::Subscribe(u) | Action::Read(u) | Action::Write(u, _) => *u,
+        };
+        let Some(ch) = chars.iter().find(|c| c.uuid == uuid) else {
+            notes.push(format!("the device has no characteristic {uuid}"));
+            continue;
+        };
+        let res = match a {
+            Action::Subscribe(_) => p.subscribe(ch).await.map_err(|e| {
+                format!(
+                    "cannot subscribe to {uuid} ({}): pair the device with the system first",
+                    redact(&e.to_string())
+                )
+            }),
+            Action::Read(_) => match p.read(ch).await {
+                Ok(v) => {
+                    let step = driver.input(&uuid, &v, true);
+                    notes.extend(step.note);
+                    queue.extend(step.actions);
+                    Ok(())
+                }
+                Err(e) => Err(format!("cannot read {uuid} ({})", redact(&e.to_string()))),
+            },
+            Action::Write(_, v) => p
+                .write(ch, &v, WriteType::WithResponse)
+                .await
+                .map_err(|e| format!("cannot write to {uuid} ({})", redact(&e.to_string()))),
+        };
+        if let Err(text) = res {
+            notes.push(text);
+        }
+    }
+    notes
 }
 
 /// `ohs-bridge scan`: nearby devices that advertise a supported service (all

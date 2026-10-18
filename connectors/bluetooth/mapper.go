@@ -5,6 +5,7 @@ package bluetooth
 import (
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -78,19 +79,19 @@ func mapMeasurement(userID string, p parsed, m *measurement) model.MapResult {
 	// The RR intervals of one notification end at its arrival: the last beat
 	// is stamped then, each earlier one at the following beat minus the
 	// following interval.
-	if len(m.rr) > 0 {
-		res.HeartbeatSamples = make([]model.HeartbeatSample, len(m.rr))
-		beat := p.at
-		for i := len(m.rr) - 1; i >= 0; i-- {
-			res.HeartbeatSamples[i] = model.HeartbeatSample{
+	beat := p.at
+	for i := len(m.rr) - 1; i >= 0; i-- {
+		if m.rrValid == nil || m.rrValid[i] {
+			res.HeartbeatSamples = append(res.HeartbeatSamples, model.HeartbeatSample{
 				SeriesID:  p.Session,
 				UserID:    userID,
 				Timestamp: beat.UTC(),
 				RRMS:      m.rr[i],
-			}
-			beat = beat.Add(-time.Duration(math.Round(m.rr[i]*1e3)) * time.Microsecond)
+			})
 		}
+		beat = beat.Add(-time.Duration(math.Round(m.rr[i]*1e3)) * time.Microsecond)
 	}
+	slices.Reverse(res.HeartbeatSamples)
 	return res
 }
 

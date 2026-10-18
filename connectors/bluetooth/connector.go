@@ -11,6 +11,11 @@
 //
 // One decoder, here: clients never decode, so a fix re-maps stored data. The
 // line format and the mapping are documented in docs/connectors/bluetooth.md.
+//
+// A few vendor services carry what the standard profiles do not (a Polar
+// strap's PP intervals and raw ECG). Their values come on the same route,
+// keyed by the characteristic's full UUID, with `ctx`: the bytes the client
+// sent to start the stream, so each line still decodes on its own.
 package bluetooth
 
 import (
@@ -42,6 +47,9 @@ const MaxValueBytes = 512
 
 // maxLineBytes bounds one line: a full value in hex and the device strings.
 const maxLineBytes = 16 * 1024
+
+// MaxCtxBytes is the longest context a line may carry.
+const MaxCtxBytes = 64
 
 // maxText bounds each device string, in characters.
 const maxText = 128
@@ -88,6 +96,7 @@ type line struct {
 	At         string  `json:"at"`
 	Char       string  `json:"char"`
 	Value      string  `json:"value"`
+	Ctx        string  `json:"ctx"`
 	Session    string  `json:"session"`
 	Device     *device `json:"device"`
 	DeviceUser *int    `json:"device_user"`
@@ -98,26 +107,38 @@ type parsed struct {
 	at    time.Time
 	char  string
 	value []byte
+	ctx   []byte
 	line
 }
 
 // baseUUIDSuffix is the Bluetooth base UUID after its 16-bit part.
 const baseUUIDSuffix = "-0000-1000-8000-00805f9b34fb"
 
-// shortUUID returns the 16-bit form of a characteristic UUID: four hex
-// digits, or the full form of the Bluetooth base UUID.
-func shortUUID(s string) (string, bool) {
+// charKey returns the key of a characteristic UUID: four lowercase hex
+// digits for a Bluetooth SIG number (written short, or in the full form of the
+// Bluetooth base UUID), the full lowercase UUID for a vendor characteristic.
+func charKey(s string) (string, bool) {
 	s = strings.ToLower(s)
 	if len(s) == 36 && strings.HasPrefix(s, "0000") && strings.HasSuffix(s, baseUUIDSuffix) {
 		s = s[4:8]
 	}
-	if len(s) != 4 {
-		return "", false
+	switch len(s) {
+	case 4:
+		if _, err := hex.DecodeString(s); err != nil {
+			return "", false
+		}
+		return s, true
+	case 36:
+		for i, c := range s {
+			dash := i == 8 || i == 13 || i == 18 || i == 23
+			hexDigit := c >= '0' && c <= '9' || c >= 'a' && c <= 'f'
+			if dash && c != '-' || !dash && !hexDigit {
+				return "", false
+			}
+		}
+		return s, true
 	}
-	if _, err := hex.DecodeString(s); err != nil {
-		return "", false
-	}
-	return s, true
+	return "", false
 }
 
 func validSession(s string) bool {
@@ -142,14 +163,20 @@ func (l line) check() (parsed, error) {
 		return p, fmt.Errorf("%w: at must be an RFC 3339 time with an offset", ErrInvalidLine)
 	}
 	var ok bool
-	if p.char, ok = shortUUID(l.Char); !ok {
-		return p, fmt.Errorf("%w: char must be a 16-bit or Bluetooth base UUID", ErrInvalidLine)
+	if p.char, ok = charKey(l.Char); !ok {
+		return p, fmt.Errorf("%w: char must be a 16-bit or a 128-bit UUID", ErrInvalidLine)
 	}
 	if len(l.Value) == 0 || len(l.Value) > 2*MaxValueBytes {
 		return p, fmt.Errorf("%w: value must hold 1 to %d bytes", ErrInvalidLine, MaxValueBytes)
 	}
 	if p.value, err = hex.DecodeString(l.Value); err != nil {
 		return p, fmt.Errorf("%w: value must be hex", ErrInvalidLine)
+	}
+	if len(l.Ctx) > 2*MaxCtxBytes {
+		return p, fmt.Errorf("%w: ctx holds at most %d bytes", ErrInvalidLine, MaxCtxBytes)
+	}
+	if p.ctx, err = hex.DecodeString(l.Ctx); err != nil {
+		return p, fmt.Errorf("%w: ctx must be hex", ErrInvalidLine)
 	}
 	if !validSession(l.Session) {
 		return p, fmt.Errorf("%w: session must be 8 to 64 letters, digits, '_' or '-'", ErrInvalidLine)
