@@ -10,7 +10,7 @@
 # On success it prints name=, dir= and version= lines, and appends them to
 # $GITHUB_OUTPUT when that is set.
 #
-#   scripts/check-sdk-tag.sh sdk-server-python-v1.0.0 [origin/main]
+#   scripts/check-sdk-tag.sh sdk-server-python-v0.1.0 [origin/main]
 set -euo pipefail
 
 tag="${1:-}"

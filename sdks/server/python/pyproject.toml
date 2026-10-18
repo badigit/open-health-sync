@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-health-sync"
-version = "1.0.0"
+version = "0.1.0"
 description = "Server-side Python SDK for Open Health Sync, the open source health data aggregator: a typed client for every API route and webhook signature checks."
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }

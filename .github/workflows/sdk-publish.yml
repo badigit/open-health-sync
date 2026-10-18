@@ -3,8 +3,8 @@
 # Publishes one SDK to its package registry when a maintainer pushes its tag:
 #
 #   sdk-react-native-v0.1.0       npm            open-health-sync-react-native
-#   sdk-server-typescript-v1.0.0  npm            @open-health-sync/server
-#   sdk-server-python-v1.0.0      PyPI           open-health-sync
+#   sdk-server-typescript-v0.1.0  npm            @open-health-sync/server
+#   sdk-server-python-v0.1.0      PyPI           open-health-sync
 #   sdk-flutter-v0.1.0            pub.dev        open_health_sync
 #   sdk-kotlin-v0.1.0             Maven Central  <group>:open-health-sync-kotlin
 #
