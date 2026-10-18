@@ -2,9 +2,13 @@
 
 //! Polar Measurement Data (PMD): how Polar straps and optical sensors (H10,
 //! H9, Verity Sense, OH1, 360) stream raw ECG, accelerometer, PPG, PP
-//! intervals, gyroscope and magnetometer frames. Written from the protocol as
-//! Polar publishes it with its BLE SDK ("Polar Measurement Data" and
-//! "H10 ECG explained"); no SDK code is used.
+//! intervals, gyroscope and magnetometer frames. Written from the documents
+//! Polar publishes next to its BLE SDK, not from the SDK's code: "Polar
+//! Measurement Data" (technical_documentation/online_measurement.pdf, 2024:
+//! UUIDs, op codes, measurement types, settings, frame layouts and the
+//! example exchanges the tests replay), the offline recording document (the
+//! width of each setting type), and documentation/ "Device Error Codes" (the
+//! status codes) and "PPI Data".
 //!
 //! One connection: read the control point for the measurement types the
 //! device offers; for each one asked for, request its settings, start it with
@@ -31,7 +35,8 @@ const START: u8 = 0x02;
 const SUCCESS: u8 = 0;
 const ALREADY_IN_STATE: u8 = 6;
 
-// Setting types, and the width of one value of each.
+// Setting types, and the width of one value of each, as Polar's table
+// lists them. A type outside the table ends a settings field.
 const SAMPLE_RATE: u8 = 0;
 const RESOLUTION: u8 = 1;
 const RANGE: u8 = 2;
@@ -44,10 +49,6 @@ fn width(setting: u8) -> Option<usize> {
         SAMPLE_RATE | RESOLUTION | RANGE => 2,
         RANGE_MILLIUNIT | FACTOR => 4,
         CHANNELS => 1,
-        6 => 16,         // security
-        7 | 8 | 12 => 1, // derived measurement method, source type, settings group
-        9 => 2,          // source sample rate
-        10 | 11 => 4,    // source range, derived time window
         _ => return None,
     })
 }
@@ -173,12 +174,7 @@ pub fn parse_settings(b: &[u8]) -> BTreeMap<u8, Vec<u32>> {
         }
         let values = out.entry(setting).or_default();
         for v in b[i + 2..end].chunks(w) {
-            // A security key (16 bytes) is not a number; keep a placeholder.
-            let n = v
-                .iter()
-                .take(4)
-                .rev()
-                .fold(0u32, |n, b| (n << 8) | *b as u32);
+            let n = v.iter().rev().fold(0u32, |n, b| (n << 8) | *b as u32);
             values.push(n);
         }
         i = end;
@@ -202,7 +198,7 @@ pub fn choose(offered: &BTreeMap<u8, Vec<u32>>) -> Vec<u8> {
     out
 }
 
-/// A status code's meaning, as the PMD document names it.
+/// A status code's meaning, as Polar's error code table names it.
 fn status_text(status: u8) -> &'static str {
     match status {
         1 => "invalid op code",
@@ -603,6 +599,51 @@ mod tests {
             vec![vec![
                 0x02, 0x02, 0x00, 0x01, 0xc8, 0x00, 0x02, 0x01, 0x08, 0x00
             ]]
+        );
+    }
+
+    #[test]
+    fn verity_sense_accelerometer_as_published() {
+        // The exchange of Polar's diagrams for a Verity Sense, byte for byte:
+        // features, accelerometer settings, start, and the answer that
+        // carries the factor 0x397FDA40.
+        let mut p = Polar::new(&[Kind::Acc]);
+        p.start();
+        let mut features = vec![0x0f, 0x6e];
+        features.extend([0; 15]);
+        let s = p.input(&CONTROL, &features, true);
+        assert_eq!(writes(&s), vec![vec![0x01, 0x02]]);
+        let settings = [
+            0xf0, 0x01, 0x02, 0x00, 0x00, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02,
+            0x01, 0x08, 0x00, 0x04, 0x01, 0x03,
+        ];
+        let s = p.input(&CONTROL, &settings, false);
+        assert_eq!(
+            writes(&s),
+            vec![vec![
+                0x02, 0x02, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00,
+                0x04, 0x01, 0x03
+            ]]
+        );
+        let answer = [
+            0xf0, 0x02, 0x02, 0x00, 0x00, 0x05, 0x01, 0x40, 0xda, 0x7f, 0x39,
+        ];
+        let s = p.input(&CONTROL, &answer, false);
+        assert_eq!(s.note.as_deref(), Some("streaming accelerometer at 52 Hz"));
+        let frame = [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x81];
+        let ctx = p.input(&DATA, &frame, false).upload.unwrap();
+        assert_eq!(&ctx[ctx.len() - 6..], &[0x05, 0x01, 0x40, 0xda, 0x7f, 0x39]);
+
+        // The H10 answers a start with one reserved byte, not a factor.
+        let mut p = Polar::new(&[Kind::Acc]);
+        p.start();
+        p.input(&CONTROL, &H10_FEATURES, true);
+        p.input(&CONTROL, &H10_ACC_SETTINGS, false);
+        p.input(&CONTROL, &[0xf0, 0x02, 0x02, 0x00, 0x00, 0x01], false);
+        let ctx = p.input(&DATA, &frame, false).upload.unwrap();
+        assert_eq!(
+            ctx,
+            vec![0x02, 0x00, 0x01, 0xc8, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00]
         );
     }
 
