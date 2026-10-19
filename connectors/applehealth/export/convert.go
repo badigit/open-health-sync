@@ -37,6 +37,11 @@ const (
 // Options tune a conversion. Every field takes part in BatchID: changing one
 // changes the parts, so it must change the batch too.
 type Options struct {
+	// Archive keeps original XML and non-measurement objects for an offline adapter.
+	// These lines are not the server upload contract.
+	Archive bool
+	// Deduplicate removes identical source objects, retaining occurrence counts.
+	Deduplicate bool
 	// Since keeps only samples whose local day is on or after it
 	// (YYYY-MM-DD). Empty keeps everything.
 	Since string
@@ -94,6 +99,8 @@ type Part struct {
 // Stats counts what a conversion read and produced. It holds counts and
 // type identifiers only, never a health value.
 type Stats struct {
+	SourceRows  map[string]int // output candidates before exact-source deduplication
+	Duplicates  map[string]int // exact-source duplicates, never differing devices/metadata
 	Records     int            // records read: export.xml elements and ECG files
 	Lines       int            // NDJSON lines produced
 	Parts       int            // parts produced
@@ -114,7 +121,8 @@ func Convert(ctx context.Context, e *Export, opts Options, emit func(Part) error
 	c := &converter{
 		ctx: ctx, exp: e, opts: opts, emit: emit,
 		groups: map[groupKey]*list.Element{}, lru: list.New(),
-		stats: Stats{Skipped: map[string]int{}, Invalid: map[string]int{}},
+		stats: Stats{Skipped: map[string]int{}, Invalid: map[string]int{}, SourceRows: map[string]int{}, Duplicates: map[string]int{}},
+		seen:  map[[32]byte]struct{}{},
 	}
 	if opts.Zone != "" {
 		c.zone, _ = time.LoadLocation(opts.Zone)
@@ -143,6 +151,7 @@ type converter struct {
 	lru      *list.List // of *group, least recently written first
 	buffered int
 	stats    Stats
+	seen     map[[32]byte]struct{}
 }
 
 func (c *converter) run() error {
@@ -181,9 +190,19 @@ func (c *converter) readXML(r io.Reader) error {
 		}
 		switch se.Name.Local {
 		case "HealthData":
+			if c.opts.Archive {
+				err = c.add("HealthData", "undated", map[string]any{"recordKind": "header", "_source": originalXML(se.Name.Local, se.Attr, "")})
+				if err != nil {
+					return err
+				}
+			}
 			continue // descend into the records
 		case "ExportDate", "Me":
-			err = dec.Skip()
+			if c.opts.Archive {
+				err = c.sourceOnly(dec, se)
+			} else {
+				err = dec.Skip()
+			}
 		case "Record":
 			var rec xmlRecord
 			if err = dec.DecodeElement(&rec, &se); err == nil {
@@ -192,19 +211,27 @@ func (c *converter) readXML(r io.Reader) error {
 		case "Correlation":
 			var corr xmlCorrelation
 			if err = dec.DecodeElement(&corr, &se); err == nil {
+				corr.Attributes, corr.Element = se.Attr, se.Name.Local
 				err = c.correlation(corr)
 			}
 		case "Workout":
 			var w xmlWorkout
 			if err = dec.DecodeElement(&w, &se); err == nil {
+				w.Attributes, w.Element = se.Attr, se.Name.Local
 				err = c.workout(w)
 			}
 		case "Audiogram":
 			var a xmlAudiogram
 			if err = dec.DecodeElement(&a, &se); err == nil {
+				a.Attributes, a.Element = se.Attr, se.Name.Local
 				err = c.audiogram(a)
 			}
 		default:
+			if c.opts.Archive {
+				c.stats.Records++
+				err = c.sourceOnly(dec, se)
+				break
+			}
 			// ActivitySummary, ClinicalRecord, VisionPrescription...: no
 			// line format for them in the upload contract.
 			c.stats.Records++
@@ -285,6 +312,9 @@ func (c *converter) newSample(typ string, a commonAttrs, md []xmlMeta) (sample, 
 	if len(meta) > 0 {
 		f["metadata"] = meta
 	}
+	if c.opts.Archive {
+		f["_source"] = originalXML(a.Element, a.Attributes, a.InnerXML)
+	}
 	return sample{start: start, end: end, day: day, fields: f}, true
 }
 
@@ -293,7 +323,23 @@ func (c *converter) record(r xmlRecord) error {
 	if r.Type == TypeHeartbeat {
 		return c.heartbeat(r)
 	}
-	if !applehealth.StoresType(r.Type) {
+	// The offline adapter retains quantity types independently of the server's
+	// narrower storage registry. No server migration or upload is implied.
+	if !applehealth.StoresType(r.Type) && !(c.opts.Archive && strings.HasPrefix(r.Type, "HKQuantityTypeIdentifier")) {
+		if c.opts.Archive {
+			s, ok := c.newSample(r.Type, r.commonAttrs, r.Metadata)
+			if !ok {
+				return nil
+			}
+			s.fields["recordType"], s.fields["rawValue"], s.fields["unit"] = r.Type, r.Value, r.Unit
+			s.fields["recordKind"] = "unmapped"
+			if r.Type == "HKDataTypeSleepDurationGoal" {
+				s.fields["recordKind"] = "goal"
+			} else {
+				c.stats.Skipped[r.Type]++
+			}
+			return c.add(r.Type, s.day, s.fields)
+		}
 		c.stats.Skipped[r.Type]++
 		return nil
 	}
@@ -319,6 +365,9 @@ func (c *converter) record(r xmlRecord) error {
 		s.fields["value"] = v
 		s.fields["unit"] = r.Unit
 	}
+	if r.HRVMetadata != nil {
+		s.fields["instantaneousBPM"] = r.HRVMetadata.Beats
+	}
 	return c.add(r.Type, s.day, s.fields)
 }
 
@@ -339,6 +388,10 @@ func (c *converter) correlation(x xmlCorrelation) error {
 			continue
 		}
 		o := map[string]any{"sampleType": r.Type, "value": v, "unit": r.Unit}
+		if c.opts.Archive {
+			o["_source"] = originalXML(r.Element, r.Attributes, r.InnerXML)
+			o["sourceId"] = sourceID(r.Type, []any{o["_source"], nil})
+		}
 		if t, err := parseExportTime(r.StartDate); err == nil {
 			o["startDate"] = wireTime(t)
 		}
@@ -462,6 +515,10 @@ func (c *converter) workoutWithRoute(s sample, route string) error {
 			continue
 		}
 		c.stats.RoutePoints++
+		if c.opts.Archive {
+			line["parentSourceId"] = sourceID(TypeWorkout, []any{s.fields["_source"], nil})
+			line["_source"] = originalXML(se.Name.Local, se.Attr, pt.InnerXML)
+		}
 		if err := p.add(line); err != nil {
 			return err
 		}
@@ -540,9 +597,12 @@ func encodeLine(v any) ([]byte, error) {
 
 // add appends a line to the open part of its (type, day).
 func (c *converter) add(typ, day string, fields map[string]any) error {
-	line, err := encodeLine(fields)
+	line, duplicate, err := c.prepareLine(typ, fields)
 	if err != nil {
 		return err
+	}
+	if duplicate {
+		return nil
 	}
 	key := groupKey{typ, day}
 	el, ok := c.groups[key]
@@ -608,9 +668,12 @@ type solo struct {
 func (c *converter) newSolo(typ, day string) *solo { return &solo{c: c, typ: typ, day: day} }
 
 func (p *solo) add(fields map[string]any) error {
-	line, err := encodeLine(fields)
+	line, duplicate, err := p.c.prepareLine(p.typ, fields)
 	if err != nil {
 		return err
+	}
+	if duplicate {
+		return nil
 	}
 	if p.lines > 0 && p.buf.Len()+len(line) > p.c.opts.MaxPartBytes {
 		// Too long for one part: the rest follows in the next one. Route

@@ -22,7 +22,7 @@ import (
 // formatVersion names the conversion rules. Bump it when a change alters the
 // lines produced, so a re-run after an upgrade uses a fresh batch instead of
 // colliding (409) with the parts of the previous one.
-const formatVersion = "1"
+const formatVersion = "2"
 
 // maxPartNumber is the largest X-OHS-Part the server accepts.
 const maxPartNumber = 1_000_000
@@ -36,6 +36,7 @@ func BatchID(exportDate string, xmlSize int64, opts Options) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "v%s\x00%s\x00%d\x00%s\x00%s\x00%d\x00%d",
 		formatVersion, exportDate, xmlSize, opts.Since, opts.Zone, opts.MaxPartBytes, opts.MaxBufferedBytes)
+	fmt.Fprintf(h, "\x00%t\x00%t", opts.Archive, opts.Deduplicate)
 	stamp := "undated"
 	if t, err := parseExportTime(exportDate); err == nil {
 		stamp = t.UTC().Format("20060102T150405Z")

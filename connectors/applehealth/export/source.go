@@ -39,9 +39,34 @@ func Open(name string) (*Export, error) {
 		// apple_health_export/). export_cda.xml is a different document.
 		root := ""
 		for _, f := range zr.File {
-			if path.Base(f.Name) == "export.xml" && (e.xml == nil || len(f.Name) < len(e.xml.Name)) {
+			if !strings.EqualFold(path.Ext(f.Name), ".xml") {
+				continue
+			}
+			r, openErr := f.Open()
+			if openErr != nil {
+				_ = zr.Close()
+				return nil, openErr
+			}
+			decoder := xml.NewDecoder(io.LimitReader(r, 64<<10))
+			isHealth := false
+			for {
+				token, readErr := decoder.Token()
+				if readErr != nil {
+					break
+				}
+				if start, ok := token.(xml.StartElement); ok {
+					isHealth = start.Name.Local == "HealthData"
+					break
+				}
+			}
+			_ = r.Close()
+			if isHealth {
+				if e.xml != nil {
+					_ = zr.Close()
+					return nil, errors.New("multiple HealthData documents in archive")
+				}
 				e.xml = f
-				root = strings.TrimSuffix(f.Name, "export.xml")
+				root = strings.TrimSuffix(f.Name, path.Base(f.Name))
 			}
 		}
 		if e.xml == nil {
@@ -50,7 +75,12 @@ func Open(name string) (*Export, error) {
 		}
 		for _, f := range zr.File {
 			if strings.HasPrefix(f.Name, root) {
-				e.files[strings.TrimPrefix(f.Name, root)] = f
+				rel := strings.TrimPrefix(f.Name, root)
+				if _, exists := e.files[rel]; exists {
+					_ = zr.Close()
+					return nil, errors.New("duplicate archive member")
+				}
+				e.files[rel] = f
 			}
 		}
 		return e, nil

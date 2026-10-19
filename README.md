@@ -9,6 +9,9 @@
 
 # Open Health Sync
 
+Fork addition: [offline Apple Health archive adapter](docs/apple-health-offline-export.md)
+with localized ECG parsing, source preservation and exact-duplicate accounting.
+
 ### One open API for wearable and health data. On your own server.
 
 Apple Health, Withings, Oura, WHOOP, Fitbit, Health Connect, Dexcom, OMRON and five more.<br>

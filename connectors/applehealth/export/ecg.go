@@ -3,31 +3,27 @@
 package export
 
 import (
+	"bufio"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// defaultECGRate is the Apple Watch sampling frequency, used when the CSV
-// header gives none.
 const defaultECGRate = 512.0
 
-// ecgClassifications maps the classification an English export writes to
-// HKElectrocardiogram.Classification raw values. Any other text, a
-// translated one included, becomes 100 (unrecognized).
 var ecgClassifications = map[string]int{
-	"sinus rhythm":        1,
-	"atrial fibrillation": 2,
-	"heart rate under 50": 3,
-	"low heart rate":      3,
-	"heart rate over 120": 4,
-	"heart rate over 150": 4,
-	"high heart rate":     4,
-	"poor recording":      5,
-	"inconclusive":        6,
+	"sinus rhythm": 1, "синусовый ритм": 1,
+	"atrial fibrillation": 2, "фибрилляция предсердий": 2,
+	"heart rate under 50": 3, "low heart rate": 3, "низкий пульс": 3,
+	"heart rate over 120": 4, "heart rate over 150": 4, "high heart rate": 4, "высокий пульс": 4,
+	"poor recording": 5, "плохая запись": 5,
+	"inconclusive": 6, "неопределенный": 6, "неопределённый": 6,
 }
 
 func (c *converter) readECGs() error {
@@ -47,99 +43,136 @@ func (c *converter) readECGs() error {
 	return nil
 }
 
-// ecg converts one electrocardiograms/*.csv file: a header of "key,value"
-// rows (the name and birth date among them, never read), then one voltage
-// per row in microvolts. It becomes one part: the recording line, then its
-// voltage lines, so the server attaches the voltages to it.
+func ecgNumber(text string) (float64, bool) {
+	text = strings.TrimSpace(strings.Trim(strings.TrimSpace(text), "\""))
+	if strings.Contains(text, ",") {
+		if strings.Count(text, ",") != 1 || strings.Contains(text, ".") {
+			return 0, false
+		}
+		text = strings.ReplaceAll(text, ",", ".")
+	}
+	n, err := strconv.ParseFloat(text, 64)
+	return n, err == nil && !math.IsNaN(n) && !math.IsInf(n, 0)
+}
+
+// ecg reads whole numeric lines before CSV headers: in Russian exports an
+// unquoted decimal comma is a decimal separator, not a second CSV column.
 func (c *converter) ecg(name string) error {
 	rc, err := c.exp.openFile(name)
 	if err != nil {
-		c.stats.Invalid[TypeECG]++
-		return nil
+		return err
 	}
 	defer rc.Close()
-	r := csv.NewReader(rc)
-	r.FieldsPerRecord = -1
-	r.LazyQuotes = true
-
-	var (
-		recorded       time.Time
-		classification = 100
-		symptoms       = 0
-		rate           = defaultECGRate
-		microvolts     []float64
-	)
-	for {
-		row, err := r.Read()
-		if errors.Is(err, io.EOF) {
-			break
+	digest := sha256.New()
+	scanner := bufio.NewScanner(io.TeeReader(rc, digest))
+	scanner.Buffer(make([]byte, 65536), 1<<20)
+	var recorded time.Time
+	classification, symptoms := 100, 0
+	rate, scale := defaultECGRate, 1e-6
+	var values []float64
+	var rawValues, headers []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
+		if line == "" {
+			continue
 		}
-		if err != nil {
-			c.stats.Invalid[TypeECG]++
-			return nil
-		}
-		if len(row) == 1 {
-			if v, err := strconv.ParseFloat(strings.TrimSpace(row[0]), 64); err == nil {
-				microvolts = append(microvolts, v)
+		if v, ok := ecgNumber(line); ok {
+			values = append(values, v)
+			if c.opts.Archive {
+				rawValues = append(rawValues, line)
 			}
 			continue
 		}
-		key, value := strings.TrimSpace(row[0]), strings.TrimSpace(row[1])
-		switch {
-		case key == "Recorded Date":
-			recorded, _ = parseExportTime(value)
-		case key == "Classification":
+		if len(values) > 0 {
+			return errors.New("invalid ECG waveform row; refusing a partial signal")
+		}
+		headers = append(headers, scanner.Text())
+		row, readErr := csv.NewReader(strings.NewReader(line)).Read()
+		if readErr != nil || len(row) < 2 {
+			continue
+		}
+		key, value := strings.ToLower(strings.TrimSpace(row[0])), strings.TrimSpace(strings.Join(row[1:], ","))
+		switch key {
+		case "recorded date", "дата записи":
+			recorded, err = parseExportTime(value)
+			if err != nil {
+				return errors.New("invalid ECG recording date")
+			}
+		case "classification", "классификация":
 			if v, ok := ecgClassifications[strings.ToLower(value)]; ok {
 				classification = v
 			}
-		case key == "Symptoms":
-			switch {
-			case value == "":
-				symptoms = 0 // not set
-			case strings.EqualFold(value, "none"):
+		case "symptoms", "симптомы":
+			switch strings.ToLower(value) {
+			case "":
+				symptoms = 0
+			case "none", "нет", "нет симптомов":
 				symptoms = 1
 			default:
 				symptoms = 2
 			}
-		case key == "Sample Rate":
-			if v, err := strconv.ParseFloat(strings.Fields(value + " x")[0], 64); err == nil && v > 0 {
-				rate = v
+		case "sample rate", "частота замеров", "частота дискретизации":
+			number := strings.Fields(value)
+			if len(number) == 0 {
+				return errors.New("missing ECG sample rate")
 			}
-		case recorded.IsZero():
-			// A translated header: the recording date is still the one value
-			// written as an export date.
-			if t, err := parseExportTime(value); err == nil {
-				recorded = t
+			var ok bool
+			rate, ok = ecgNumber(number[0])
+			if !ok || rate <= 0 {
+				return errors.New("invalid ECG sample rate")
+			}
+		case "unit", "units", "единицы":
+			switch strings.ToLower(value) {
+			case "µv", "μv", "uv", "мкв", "microvolts", "микровольты":
+				scale = 1e-6
+			case "mv", "мв", "millivolts", "милливольты":
+				scale = 1e-3
+			case "v", "в", "volts", "вольты":
+				scale = 1
+			default:
+				return errors.New("unsupported ECG voltage unit")
+			}
+		default:
+			if recorded.IsZero() {
+				if t, e := parseExportTime(value); e == nil {
+					recorded = t
+				}
 			}
 		}
 	}
-	if recorded.IsZero() || len(microvolts) == 0 {
-		c.stats.Invalid[TypeECG]++
-		return nil
+	if err := scanner.Err(); err != nil {
+		return err
 	}
-	end := recorded.Add(time.Duration(float64(len(microvolts)) / rate * float64(time.Second)))
-	s, ok := c.newSample(TypeECG, commonAttrs{
-		StartDate: recorded.Format(exportLayout),
-		EndDate:   end.Format(exportLayout),
-	}, nil)
+	if recorded.IsZero() || len(values) == 0 {
+		return errors.New("ECG date or waveform missing; refusing a partial recording")
+	}
+	end := recorded.Add(time.Duration(float64(len(values)) / rate * float64(time.Second)))
+	s, ok := c.newSample(TypeECG, commonAttrs{StartDate: recorded.Format(exportLayout), EndDate: end.Format(exportLayout)}, nil)
 	if !ok {
-		return nil
+		return errors.New("ECG recording has invalid dates")
 	}
-	s.fields["classification"] = classification
-	s.fields["symptomsStatus"] = symptoms
-	s.fields["samplingFrequency"] = rate
-	s.fields["numberOfVoltageMeasurements"] = len(microvolts)
-
+	// Export timestamps have whole seconds, but waveform duration need not.
+	s.fields["endDate"] = wireTime(end)
+	s.fields["classification"], s.fields["symptomsStatus"] = classification, symptoms
+	s.fields["samplingFrequency"], s.fields["numberOfVoltageMeasurements"] = rate, len(values)
+	fileID := hex.EncodeToString(digest.Sum(nil))
+	if c.opts.Archive {
+		s.fields["_source"] = map[string]any{"format": "ecg-csv", "sha256": fileID, "headers": headers}
+	}
+	parentID := sourceID(TypeECG, []any{s.fields["_source"], nil})
 	p := c.newSolo(TypeECG, s.day)
 	if err := p.add(s.fields); err != nil {
 		return err
 	}
-	for i, uv := range microvolts {
-		// The contract carries volts, as HealthKit gives them.
-		if err := p.add(map[string]any{
-			"timeSinceSampleStart": float64(i) / rate,
-			"value":                uv / 1e6,
-		}); err != nil {
+	for i, value := range values {
+		fields := map[string]any{"timeSinceSampleStart": float64(i) / rate, "value": value * scale}
+		if c.opts.Archive {
+			fields["parentSourceId"] = parentID
+			fields["sourceFileSHA256"] = fileID
+			fields["sampleIndex"] = i
+			fields["rawValue"] = rawValues[i]
+		}
+		if err := p.add(fields); err != nil {
 			return err
 		}
 	}

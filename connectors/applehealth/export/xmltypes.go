@@ -3,6 +3,7 @@
 package export
 
 import (
+	"encoding/xml"
 	"strconv"
 	"strings"
 	"time"
@@ -17,24 +18,46 @@ type xmlMeta struct {
 }
 
 type commonAttrs struct {
-	SourceName    string `xml:"sourceName,attr"`
-	SourceVersion string `xml:"sourceVersion,attr"`
-	Device        string `xml:"device,attr"`
-	StartDate     string `xml:"startDate,attr"`
-	EndDate       string `xml:"endDate,attr"`
+	Attributes    []xml.Attr `xml:"-"`
+	Element       string     `xml:"-"`
+	InnerXML      string     `xml:",innerxml"`
+	SourceName    string     `xml:"sourceName,attr"`
+	SourceVersion string     `xml:"sourceVersion,attr"`
+	Device        string     `xml:"device,attr"`
+	StartDate     string     `xml:"startDate,attr"`
+	EndDate       string     `xml:"endDate,attr"`
+}
+
+type instantaneousBPM struct {
+	Time string `xml:"time,attr" json:"time"`
+	BPM  string `xml:"bpm,attr" json:"bpm"`
 }
 
 type xmlRecord struct {
 	commonAttrs
-	Type       string    `xml:"type,attr"`
-	Unit       string    `xml:"unit,attr"`
-	Value      string    `xml:"value,attr"`
-	Metadata   []xmlMeta `xml:"MetadataEntry"`
+	Type        string    `xml:"type,attr"`
+	Unit        string    `xml:"unit,attr"`
+	Value       string    `xml:"value,attr"`
+	Metadata    []xmlMeta `xml:"MetadataEntry"`
+	HRVMetadata *struct {
+		Beats []instantaneousBPM `xml:"InstantaneousBeatsPerMinute"`
+	} `xml:"HeartRateVariabilityMetadataList"`
 	Heartbeats *struct {
 		Beats []struct {
 			Time string `xml:"time,attr"`
 		} `xml:"InstantaneousBeatsPerMinute"`
 	} `xml:"HeartbeatSeries"`
+}
+
+func (r *xmlRecord) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain xmlRecord
+	var value plain
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*r = xmlRecord(value)
+	r.Attributes, r.Element = start.Attr, start.Name.Local
+	return nil
 }
 
 type xmlCorrelation struct {
@@ -87,11 +110,12 @@ type xmlAudiogram struct {
 
 // gpxPoint is one trkpt of a workout route GPX file.
 type gpxPoint struct {
-	Lat  string `xml:"lat,attr"`
-	Lon  string `xml:"lon,attr"`
-	Ele  string `xml:"ele"`
-	Time string `xml:"time"`
-	Ext  struct {
+	InnerXML string `xml:",innerxml"`
+	Lat      string `xml:"lat,attr"`
+	Lon      string `xml:"lon,attr"`
+	Ele      string `xml:"ele"`
+	Time     string `xml:"time"`
+	Ext      struct {
 		Speed  string `xml:"speed"`
 		Course string `xml:"course"`
 		HAcc   string `xml:"hAcc"`
