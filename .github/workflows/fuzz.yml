@@ -8,8 +8,6 @@
 name: fuzz
 
 on:
-  schedule:
-    - cron: "41 2 * * *"
   workflow_dispatch:
 
 permissions:
