@@ -1,7 +1,23 @@
 name: sdks
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/**"
+      - "api/openapi.yaml"
+      - "connectors/applehealth/**"
+      - "test/e2e/sdks.sh"
+      - "test/e2e/lib.sh"
+      - ".github/workflows/sdks.yml"
+  pull_request:
+    paths:
+      - "sdks/**"
+      - "api/openapi.yaml"
+      - "connectors/applehealth/**"
+      - "test/e2e/sdks.sh"
+      - "test/e2e/lib.sh"
+      - ".github/workflows/sdks.yml"
 
 permissions:
   contents: read

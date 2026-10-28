@@ -1,7 +1,17 @@
 name: examples
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "examples/**"
+      - "sdks/**"
+      - ".github/workflows/examples.yml"
+  pull_request:
+    paths:
+      - "examples/**"
+      - "sdks/**"
+      - ".github/workflows/examples.yml"
 
 permissions:
   contents: read

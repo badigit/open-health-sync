@@ -7,6 +7,10 @@
 name: reliability
 
 on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:

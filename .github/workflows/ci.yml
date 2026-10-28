@@ -1,7 +1,9 @@
 name: ci
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
@@ -200,7 +202,7 @@ jobs:
   guard:
     # Fork pull requests get no secrets and the guard fails closed without
     # its list, so it runs on pushes and same-repository pull requests only.
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

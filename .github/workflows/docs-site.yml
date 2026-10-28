@@ -3,7 +3,11 @@ name: docs-site
 # Builds the documentation site whenever its sources change, and keeps the static
 # output as a downloadable artifact so a pull request can be previewed locally.
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["docs-site/**", "docs/**", "api/openapi.yaml", "deploy/docker-compose.yml"]
+  pull_request:
+    paths: ["docs-site/**", "docs/**", "api/openapi.yaml", "deploy/docker-compose.yml"]
 
 permissions:
   contents: read
